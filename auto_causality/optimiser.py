@@ -182,6 +182,7 @@ class AutoCausality:
         outcome: str,
         common_causes: List[str],
         effect_modifiers: List[str],
+        metric: str = 'erupt',
     ):
         """Performs AutoML on list of causal inference estimators
         - If estimator has a search space specified in its parameters, HPO is performed on the whole model.
@@ -208,6 +209,7 @@ class AutoCausality:
         self.identified_estimand = self.causal_model.identify_effect(
             proceed_when_unidentifiable=True
         )
+        self.metric = metric
 
         if self._settings["tuner"]["verbose"] > 0:
             print(f"fitting estimators: {self.estimator_list}")
@@ -269,7 +271,7 @@ class AutoCausality:
 
         # compute a metric and return results
         scores = self._compute_metrics()
-        results = {"ERUPT": scores["test"]["erupt"], "ATE": scores["test"]["ate"]}
+        results = {"metric": scores["test"]["score"], "ATE": scores["test"]["ate"]}
         return results
 
     def _estimate_effect(self):
@@ -307,9 +309,9 @@ class AutoCausality:
         scores = {
             "estimator": self.estimator,
             "train": make_scores(
-                self.estimates[self.estimator], self.train_df, te_train
+                self.estimates[self.estimator], self.train_df, te_train, self.metric
             ),
-            "test": make_scores(self.estimates[self.estimator], self.test_df, te_test),
+            "test": make_scores(self.estimates[self.estimator], self.test_df, te_test, self.metric),
         }
         return scores
 

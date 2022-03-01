@@ -1,5 +1,6 @@
 from typing import Optional
 import math
+import causalml
 
 import numpy as np
 import pandas as pd
@@ -22,10 +23,9 @@ class DummyEstimator:
         return self.cate_estimate
 
 
-def make_scores(
+def erupt_make_scores(
     estimate: CausalEstimate, df: pd.DataFrame, cate_estimate: np.ndarray
-) -> dict:
-
+) -> float:
     est = estimate.estimator
     treatment_name = est._treatment_name
     if not isinstance(treatment_name, str):
@@ -43,6 +43,23 @@ def make_scores(
         df[est._outcome_name],
         cate_estimate > 0,
     )
+    return erupt_score
+
+def qini_make_score():
+    return 
+
+
+
+
+def make_scores(
+    estimate: CausalEstimate, df: pd.DataFrame, cate_estimate: np.ndarray, metric: str = "erupt"
+) -> dict:
+
+    est = estimate.estimator
+    treatment_name = est._treatment_name
+    if not isinstance(treatment_name, str):
+        treatment_name = treatment_name[0]
+
 
     intrp = SingleTreeCateInterpreter(
         include_model_uncertainty=False, max_depth=2, min_samples_leaf=10
@@ -50,6 +67,12 @@ def make_scores(
     intrp.interpret(DummyEstimator(cate_estimate), df)
     intrp.feature_names = est._effect_modifier_names
 
+    erupt = ERUPT(
+        treatment_name=treatment_name,
+        propensity_model=DummyClassifier(strategy="prior"),
+        X_names=est._effect_modifier_names,
+    )
+    erupt.fit(df)
     values = df[[treatment_name, est._outcome_name]].reset_index(drop=True)
     values["p"] = erupt.propensity_model.predict_proba(df)[:, 1]
     values["policy"] = cate_estimate > 0
@@ -59,8 +82,14 @@ def make_scores(
 
     assert len(values) == len(df), "Index weirdness when adding columns!"
 
+    if metric == 'erupt':
+        score = erupt_make_scores(estimate, df, cate_estimate)
+    elif metric == 'qini':
+        score = 1
+
+
     return {
-        "erupt": erupt_score,
+        "score": score,
         "ate": cate_estimate.mean(),
         "intrp": intrp,
         "values": values,
