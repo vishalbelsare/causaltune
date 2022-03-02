@@ -1,6 +1,6 @@
 from typing import Optional
 import math
-import causalml
+from causalml import metrics
 
 import numpy as np
 import pandas as pd
@@ -45,10 +45,23 @@ def erupt_make_scores(
     )
     return erupt_score
 
-def qini_make_score():
-    return 
 
-
+def qini_make_score(
+        estimate: CausalEstimate,
+        df: pd.DataFrame,
+        cate_estimate: np.ndarray) -> float:
+    est = estimate.estimator
+    df['tau'] = cate_estimate
+    treatment_name = est._treatment_name
+    if not isinstance(treatment_name, str):
+        treatment_name = treatment_name[0]
+    qini_score_float = metrics.visualize.qini_score(
+        df,
+        est._outcome_name,
+        treatment_name,
+    )
+    print(type(qini_score_float))
+    return qini_score_float
 
 
 def make_scores(
@@ -85,7 +98,7 @@ def make_scores(
     if metric == 'erupt':
         score = erupt_make_scores(estimate, df, cate_estimate)
     elif metric == 'qini':
-        score = 1
+        score = qini_make_score(estimate, df, cate_estimate)
 
 
     return {
