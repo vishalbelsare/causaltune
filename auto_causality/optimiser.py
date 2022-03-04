@@ -95,6 +95,7 @@ class AutoCausality:
 
         self.estimates = {}
         self.results = {}
+        self.scores = {}
         self.estimator_list = self._create_estimator_list()
 
         self.train_df = train_df or pd.DataFrame()
@@ -227,6 +228,7 @@ class AutoCausality:
                 self.results[self.estimator] = scores["test"][
                     self._settings["metric"].lower()
                 ]
+                self.scores[self.estimator] = scores
             else:
                 results = tune.run(
                     self._tune_with_config,
@@ -237,6 +239,8 @@ class AutoCausality:
                     low_cost_partial_config={},
                     **self._settings["tuner"],
                 )
+
+                self.scores[self.estimator] = results["scores"]
 
                 # log results
                 best_trial = results.get_best_trial()
@@ -271,8 +275,13 @@ class AutoCausality:
         self._estimate_effect()
 
         # compute a metric and return results
+
         scores = self._compute_metrics()
-        results = {"ERUPT": scores["test"]["erupt"], "ATE": scores["test"]["ate"]}
+        results = {
+            "ERUPT": scores["test"]["erupt"],
+            "ATE": scores["test"]["ate"],
+            "scores": scores,
+        }
         return results
 
     def _estimate_effect(self):
