@@ -46,7 +46,7 @@ class AutoCausality:
         use_ray=False,
         estimator_list="auto",
         train_size=0.8,
-        test_size=None,
+        test_size=0.2,
         use_dummyclassifier=True,
         components_task="regression",
         components_verbose=0,
@@ -67,8 +67,8 @@ class AutoCausality:
             use_ray (bool): use Ray backend (nrequires ray to be installed).
             estimator_list (list): a list of strings for estimator names, or "auto".
                e.g. ```['dml', 'CausalForest']```
-            train_size (float): Fraction of data used for training set. Defaults to 0.5.
-            test_size (float): Optional size of test dataset. Defaults to None.
+            train_size (float): Fraction of non-test data used for training set (as opposed to validation). Defaults to 0.8.
+            test_size (float): Fraction of total data used for test set. Defaults to 0.2
             use_dummyclassifier (bool): use dummy classifier for propensity model or not. Defaults to True.
             components_task (str): task for component models. Defaults to "regression".
             components_verbose (int): verbosity of component model HPO. range (0,3). Defaults to 0.
@@ -89,6 +89,7 @@ class AutoCausality:
         self._settings["metric"] = metric
         self._settings["metrics_to_report"] = metrics_to_report
         self._settings["estimator_list"] = estimator_list
+        self._settings["use_r_score"] = 'r_score' in [self._settings["metric"]] + self._settings["metrics_to_report"]
 
         # params for FLAML on component models:
         self._settings["use_dummyclassifier"] = use_dummyclassifier
@@ -229,10 +230,15 @@ class AutoCausality:
 
         self.data_df = data_df
         self.train_df, self.test_df = train_test_split(
-            data_df, train_size=self._settings["train_size"]
+            data_df, train_size= 1 - self._settings["test_size"]
         )
-        if self._settings["test_size"] is not None:
-            self.test_df = self.test_df.sample(self._settings["test_size"])
+        self.train_df, self.val_df = train_test_split(
+            data_df, train_size= self._settings["train_size"]
+        )
+
+
+        #if self._settings["test_size"] is not None:
+        #    self.test_df = self.test_df.sample(self._settings["test_size"])
 
         self.causal_model = CausalModel(
             data=self.train_df,
@@ -249,11 +255,13 @@ class AutoCausality:
             self.outcome_model,
             self.propensity_model,
             self.train_df,
+            self.val_df,
             self.test_df,
             outcome,
             treatment,
             common_causes,
             effect_modifiers,
+            use_r_score = self._settings["use_r_score"]
         )
 
         self.tune_results = (
@@ -289,7 +297,7 @@ class AutoCausality:
                     last_result = results.get_best_trial().last_result
 
             self.estimates[self.estimator_name] = last_result.pop("estimator")
-            self.full_scores[estimator_name] = last_result.pop("scores")
+            self.full_scores[estimator_name] = last_result["scores"]
             self.scores[self.estimator_name] = last_result[self._settings["metric"]]
 
             if self._settings["tuner"]["verbose"] > 0:
@@ -297,7 +305,9 @@ class AutoCausality:
                 for metric in [self._settings["metric"]] + self._settings[
                     "metrics_to_report"
                 ]:
+            
                     print(f" {metric} (validation): {last_result[metric]:6f}")
+                    print(f" {metric} (test): {last_result['scores']['test'][metric]:6f}")
 
     def _tune_with_config(self, config: dict) -> dict:
         """Performs Hyperparameter Optimisation for a
@@ -364,10 +374,13 @@ class AutoCausality:
         """computes metrics to score causal estimators"""
         try:
             te_train = estimator.cate_estimates
+            X_val = self.val_df[estimator.estimator._effect_modifier_names]
+            te_val = estimator.estimator.estimator.effect(X_val).flatten()
             X_test = self.test_df[estimator.estimator._effect_modifier_names]
             te_test = estimator.estimator.estimator.effect(X_test).flatten()
         except Exception:
             te_train = estimator.estimator.effect(self.train_df)
+            te_val = estimator.estimator.effect(self.val_df)
             te_test = estimator.estimator.effect(self.test_df)
 
         scores = {
@@ -379,6 +392,12 @@ class AutoCausality:
                 r_scorer=self.r_scorer.train,
             ),
             "validation": make_scores(
+                estimator,
+                self.val_df,
+                te_val,
+                r_scorer=self.r_scorer.val,
+            ),
+            "test": make_scores(
                 estimator,
                 self.test_df,
                 te_test,

@@ -13,27 +13,40 @@ class RScoreWrapper:
         model_y,
         model_t,
         train_df,
+        val_df,
         test_df,
         outcome,
         treatment,
         common_causes,
         effect_modifiers,
+        use_r_score = False
     ):
-
-        self.train = RScorer(model_y=model_y, model_t=model_t, discrete_treatment=True)
-        self.test = RScorer(model_y=model_y, model_t=model_t, discrete_treatment=True)
-        self.train.fit(
-            train_df[outcome].to_numpy(),
-            train_df[treatment].to_numpy(),
-            train_df[common_causes].to_numpy(),
-            train_df[effect_modifiers].to_numpy(),
-        )
-        self.test.fit(
-            test_df[outcome].to_numpy(),
-            test_df[treatment].to_numpy(),
-            test_df[common_causes].to_numpy(),
-            test_df[effect_modifiers].to_numpy(),
-        )
+        if use_r_score:
+            self.train = RScorer(model_y=model_y, model_t=model_t, discrete_treatment=True)
+            self.val = RScorer(model_y=model_y, model_t=model_t, discrete_treatment=True)
+            self.test = RScorer(model_y=model_y, model_t=model_t, discrete_treatment=True)
+            self.train.fit(
+                train_df[outcome].to_numpy(),
+                train_df[treatment].to_numpy(),
+                train_df[common_causes].to_numpy(),
+                train_df[effect_modifiers].to_numpy(),
+            )
+            self.val.fit(
+                val_df[outcome].to_numpy(),
+                val_df[treatment].to_numpy(),
+                val_df[common_causes].to_numpy(),
+                val_df[effect_modifiers].to_numpy(),
+            )
+            self.test.fit(
+                test_df[outcome].to_numpy(),
+                test_df[treatment].to_numpy(),
+                test_df[common_causes].to_numpy(),
+                test_df[effect_modifiers].to_numpy(),
+            )
+        else:
+            self.train = None
+            self.val = None
+            self.test = None
 
 
 class RScorer:
