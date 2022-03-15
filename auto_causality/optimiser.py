@@ -3,6 +3,8 @@ from typing import List
 from copy import deepcopy
 
 import pandas as pd
+import pickle
+from datetime import datetime
 from flaml import tune, AutoML
 from sklearn.dummy import DummyClassifier
 from sklearn.model_selection import train_test_split
@@ -53,6 +55,7 @@ class AutoCausality:
         components_pred_time_limit=10 / 1e6,
         components_njobs=-1,
         components_time_budget=20,
+        model_save_path=None,
     ):
         """constructor.
 
@@ -77,6 +80,7 @@ class AutoCausality:
                 Defaults to -1 (all available cores).
             components_time_budget (float): time budget for HPO of component models in seconds.
                 Defaults to overall time budget / 2.
+            model_save_path (string): path to save pickle files for best model for each estimator type
         """
         self._settings = {}
         self._settings["tuner"] = {}
@@ -106,6 +110,7 @@ class AutoCausality:
         )
         self._settings["train_size"] = train_size
         self._settings["test_size"] = test_size
+        self._settings["model_save_path"] = model_save_path
 
         # user can choose between flaml and dummy for propensity model.
         self.propensity_model = (
@@ -298,6 +303,12 @@ class AutoCausality:
                     "metrics_to_report"
                 ]:
                     print(f" {metric} (train): {last_result[metric]:6f}")
+        if self._settings['model_save_path']:
+            for estimator_name in self.estimator_list:
+                with open(self._settings['model_save_path']+f'{estimator_name}_{self._settings["tuner"]["time_budget_s"]}_{datetime.now().strftime('%Y-%m-%d_%H:%M:%S')}.pickle', 'wb') as handle:
+                    pickle.dump(self.best_model_for_estimator(estimator_name))
+
+
 
     def _tune_with_config(self, config: dict) -> dict:
         """Performs Hyperparameter Optimisation for a
