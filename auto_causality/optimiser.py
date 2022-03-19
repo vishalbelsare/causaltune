@@ -10,7 +10,7 @@ from dowhy import CausalModel
 from joblib import Parallel, delayed
 
 from auto_causality.params import SimpleParamService
-from auto_causality.scoring import make_scores
+from auto_causality.scoring import make_scores, make_baseline
 from auto_causality.r_score import RScoreWrapper
 from auto_causality.utils import clean_config
 
@@ -299,6 +299,12 @@ class AutoCausality:
                 ]:
                     print(f" {metric} (train): {last_result[metric]:6f}")
 
+        # Include baseline scores
+        baseline_train = make_baseline(treatment, effect_modifiers, outcome, self.train_df)
+        baseline_test = make_baseline(treatment, effect_modifiers, outcome, self.test_df)
+        self.full_scores['baseline'] = {'estimator_name': 'baseline', 'train': baseline_train, 'test': baseline_test}
+
+
     def _tune_with_config(self, config: dict) -> dict:
         """Performs Hyperparameter Optimisation for a
         causal inference estimator
@@ -322,6 +328,11 @@ class AutoCausality:
         # self.trained_estimators_dict[self.estimator] = self.estimates[
         #     self.estimator
         # ].estimator.estimator
+                # Store the estimates and the fitted estimators 
+
+        self.estimates[self.estimator_name] = estimates['estimator'] # This is an CausalEstimate instance
+        self.trained_estimators_dict[self.estimator_name] = self.estimates[self.estimator_name].estimator.estimator
+
         return estimates
 
     def _estimate_effect(self, config):

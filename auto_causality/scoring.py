@@ -21,6 +21,23 @@ class DummyEstimator:
     def const_marginal_effect(self, X):
         return self.cate_estimate
 
+class DummyEstimate:
+    def __init__(
+        self,treatment_name, effect_modifier_names, outcome_name,
+    ):
+
+        self._treatment_name = treatment_name
+        self._effect_modifier_names = effect_modifier_names
+        self._outcome_name = outcome_name
+
+    @ property
+    def estimator(self):
+        return self
+
+
+
+def make_baseline(treatment_name, effect_modifier_names, outcome_name, df:pd.DataFrame) -> dict:
+    return make_scores(DummyEstimate(treatment_name,effect_modifier_names,outcome_name), df, np.random.normal(len(df)))
 
 def erupt_make_scores(
     estimate: CausalEstimate, df: pd.DataFrame, cate_estimate: np.ndarray
@@ -114,8 +131,14 @@ def make_scores(
     intrp = SingleTreeCateInterpreter(
         include_model_uncertainty=False, max_depth=2, min_samples_leaf=10
     )
-    intrp.interpret(DummyEstimator(cate_estimate), df)
-    intrp.feature_names = est._effect_modifier_names
+
+    # To be reviewed: interpret doesn't work with the baseline (vacuous) estimate
+    try:
+        intrp.interpret(DummyEstimator(cate_estimate), df)
+        intrp.feature_names = est._effect_modifier_names
+    except:
+        intrp = None
+
 
     erupt = ERUPT(
         treatment_name=treatment_name,
@@ -126,7 +149,7 @@ def make_scores(
     values = df[[treatment_name, est._outcome_name]].reset_index(drop=True)
     values["p"] = erupt.propensity_model.predict_proba(df)[:, 1]
     values["policy"] = cate_estimate > 0
-    values["weights"] = erupt.weights(df, lambda x: cate_estimate > 0)
+    values["weights"] = erupt.weights(df, cate_estimate > 0)
 
     values = values.rename(columns={treatment_name: "treated"})
 
@@ -139,7 +162,7 @@ def make_scores(
         "r_score": 0
         if r_scorer is None
         else r_make_score(estimate, df, cate_estimate, r_scorer),
-        "ate": cate_estimate.mean(),
+        "ate": np.mean(cate_estimate),
         "intrp": intrp,
         "values": values,
     }
