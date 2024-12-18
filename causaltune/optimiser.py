@@ -1,8 +1,8 @@
 import copy
-from copy import deepcopy
 import warnings
 from typing import List, Optional, Union
 from collections import defaultdict
+import time
 
 import traceback
 import pandas as pd
@@ -17,26 +17,24 @@ from dowhy.causal_identifier import IdentifiedEstimand
 
 from econml.inference import BootstrapInference
 
-from joblib import Parallel, delayed
-
-from causaltune.params import SimpleParamService
-from causaltune.scoring import Scorer
-from causaltune.r_score import RScoreWrapper
-from causaltune.utils import clean_config, treatment_is_multivalue
+from causaltune.search.params import SimpleParamService
+from causaltune.score.scoring import Scorer, metrics_to_minimize
+from causaltune.utils import treatment_is_multivalue
 from causaltune.models.monkey_patches import (
     AutoML,
     apply_multitreatment,
     effect_stderr,
 )
+
+# from causaltune.models.monkey_patch_flaml import run
+
 from causaltune.data_utils import CausalityDataset
 from causaltune.dataset_processor import CausalityDatasetProcessor
 from causaltune.models.passthrough import feature_filter
 
 
 # Patched from sklearn.linear_model._base to adjust rtol and atol values
-def _check_precomputed_gram_matrix(
-    X, precompute, X_offset, X_scale, rtol=1e-4, atol=1e-2
-):
+def _check_precomputed_gram_matrix(X, precompute, X_offset, X_scale, rtol=1e-4, atol=1e-2):
     n_features = X.shape[1]
     f1 = n_features // 2
     f2 = min(f1 + 1, n_features - 1)
@@ -96,7 +94,7 @@ class CausalTune:
         test_size=None,
         num_samples=-1,
         propensity_model="dummy",
-        outcome_model=None,
+        outcome_model="nested",
         components_task="regression",
         components_verbose=0,
         components_pred_time_limit=10 / 1e6,
@@ -115,7 +113,6 @@ class CausalTune:
             data_df (pandas.DataFrame): dataset to perform causal inference on
             metric (str): metric to optimise.
                 Defaults to "erupt" for CATE, "energy_distance" for IV
-            metrics_to_report (list): additional metrics to compute and report.
             metrics_to_report (list): additional metrics to compute and report.
                 Defaults to ["qini","auc","ate","erupt", "norm_erupt"] for CATE
                 or ["energy_distance"] for IV
@@ -174,24 +171,17 @@ class CausalTune:
         self._settings["tuner"]["time_budget_s"] = time_budget
         self._settings["tuner"]["num_samples"] = num_samples
         self._settings["tuner"]["verbose"] = verbose
-        self._settings["tuner"][
-            "use_ray"
-        ] = use_ray  # requires ray to be installed via pip install flaml[ray]
         self._settings["tuner"]["resources_per_trial"] = (
             resources_per_trial if resources_per_trial is not None else {"cpu": 0.5}
         )
         self._settings["try_init_configs"] = try_init_configs
-        self._settings["include_experimental_estimators"] = (
-            include_experimental_estimators
-        )
+        self._settings["include_experimental_estimators"] = include_experimental_estimators
 
         # params for FLAML on component models:
         self._settings["component_models"] = {}
         self._settings["component_models"]["task"] = components_task
         self._settings["component_models"]["verbose"] = components_verbose
-        self._settings["component_models"][
-            "pred_time_limit"
-        ] = components_pred_time_limit
+        self._settings["component_models"]["pred_time_limit"] = components_pred_time_limit
         self._settings["component_models"]["n_jobs"] = components_njobs
         self._settings["component_models"]["time_budget"] = components_time_budget
         self._settings["component_models"]["eval_method"] = "holdout"
@@ -218,6 +208,7 @@ class CausalTune:
         self.causal_model = None
         self.identified_estimand = None
         self.problem = None
+        self.use_ray = use_ray
         # properties that are used to resume fits (warm start)
         self.resume_scores = []
         self.resume_cfg = []
@@ -236,9 +227,7 @@ class CausalTune:
             self.propensity_model = AutoML(
                 **{**self._settings["component_models"], "task": "classification"}
             )
-        elif hasattr(propensity_model, "fit") and hasattr(
-            propensity_model, "predict_proba"
-        ):
+        elif hasattr(propensity_model, "fit") and hasattr(propensity_model, "predict_proba"):
             self.propensity_model = propensity_model
         else:
             raise ValueError(
@@ -246,33 +235,42 @@ class CausalTune:
             )
 
     def init_outcome_model(self, outcome_model):
+        # TODO: implement filtering like below, when there are propensity-only features
+        # feature_filter below acts on classes not instances
+        # to preserve all the extra methods through inheritance
         # if we are only supplying certain features to the propensity function,
         # make them invisible to the outcome component model
         # This is a workaround for the DoWhy/EconML data model which doesn't
         # support that out of the box
-        if outcome_model is not None:
-            # TODO: implement filtering like below, when there are propensity-only features
-            # feature_filter below acts on classes not instances
-            # to preserve all the extra methods through inheritance
-            self.outcome_model = outcome_model
+
+        if hasattr(outcome_model, "fit") and hasattr(outcome_model, "predict"):
+            return outcome_model
+        elif outcome_model == "auto":
+            # Will be dynamically chosen at optimization time
+            return outcome_model
+        elif outcome_model == "nested":
+            # The current default behavior
+            return self.auto_outcome_model()
         else:
-            data = self.data
-            propensity_only_cols = [
-                p
-                for p in data.propensity_modifiers
-                if p not in data.common_causes + data.effect_modifiers
-            ]
+            raise ValueError('outcome_model valid values are None, "auto", or an estimator object')
 
-            if len(propensity_only_cols):
-                outcome_model_class = feature_filter(
-                    AutoML, data.effect_modifiers + data.common_causes, first_cols=True
-                )
-            else:
-                outcome_model_class = AutoML
+    def auto_outcome_model(self):
+        data = self.data
+        propensity_only_cols = [
+            p
+            for p in data.propensity_modifiers
+            if p not in data.common_causes + data.effect_modifiers
+        ]
 
-            self.outcome_model = outcome_model_class(
-                **self._settings["component_models"]
+        if len(propensity_only_cols):
+            # TODO: implement feature_filter for arbitrary outcome models
+            outcome_model_class = feature_filter(
+                AutoML, data.effect_modifiers + data.common_causes, first_cols=True
             )
+        else:
+            outcome_model_class = AutoML
+
+        return outcome_model_class(**self._settings["component_models"])
 
     def fit(
         self,
@@ -289,6 +287,7 @@ class CausalTune:
         preprocess: bool = False,
         encoder_type: Optional[str] = None,
         encoder_outcome: Optional[str] = None,
+        use_ray: Optional[bool] = None,
     ):
         """Performs AutoML on list of causal inference estimators
         - If estimator has a search space specified in its parameters, HPO is performed on the whole model.
@@ -312,6 +311,9 @@ class CausalTune:
         Returns:
             None
         """
+        if use_ray is not None:
+            self.use_ray = use_ray
+
         if outcome is None and isinstance(data, CausalityDataset):
             outcome = data.outcomes[0]
 
@@ -330,9 +332,7 @@ class CausalTune:
         if preprocess:
             data = copy.deepcopy(data)
             self.dataset_processor = CausalityDatasetProcessor()
-            self.dataset_processor.fit(
-                data, encoder_type=encoder_type, outcome=encoder_outcome
-            )
+            self.dataset_processor.fit(data, encoder_type=encoder_type, outcome=encoder_outcome)
             data = self.dataset_processor.transform(data)
         else:
             self.dataset_processor = None
@@ -340,9 +340,7 @@ class CausalTune:
         self.data = data
         treatment_values = data.treatment_values
 
-        assert (
-            len(treatment_values) > 1
-        ), "Treatment must take at least 2 values, eg 0 and 1!"
+        assert len(treatment_values) > 1, "Treatment must take at least 2 values, eg 0 and 1!"
 
         self._control_value = treatment_values[0]
         self._treatment_values = list(treatment_values[1:])
@@ -363,10 +361,9 @@ class CausalTune:
         )
 
         self.init_propensity_model(self._settings["propensity_model"])
-        self.init_outcome_model(self._settings["outcome_model"])
 
-        self.identified_estimand: IdentifiedEstimand = (
-            self.causal_model.identify_effect(proceed_when_unidentifiable=True)
+        self.identified_estimand: IdentifiedEstimand = self.causal_model.identify_effect(
+            proceed_when_unidentifiable=True
         )
 
         if bool(self.identified_estimand.estimands["iv"]) and bool(data.instruments):
@@ -406,11 +403,10 @@ class CausalTune:
 
         # config with method-specific params
         self.cfg = SimpleParamService(
-            self.propensity_model,
-            self.outcome_model,
             n_jobs=self._settings["component_models"]["n_jobs"],
             include_experimental=self._settings["include_experimental_estimators"],
             multivalue=treatment_is_multivalue(self._treatment_values),
+            sample_outcome_estimators=self._settings["outcome_model"] == "auto",
         )
 
         self.estimator_list = self.cfg.estimator_names_from_patterns(
@@ -438,9 +434,7 @@ class CausalTune:
             and self._settings["tuner"]["num_samples"] == -1
         ):
             self._settings["tuner"]["time_budget_s"] = (
-                2.5
-                * len(self.estimator_list)
-                * self._settings["component_models"]["time_budget"]
+                2.5 * len(self.estimator_list) * self._settings["component_models"]["time_budget"]
             )
 
         cmtb = self._settings["component_models"]["time_budget"]
@@ -454,24 +448,28 @@ class CausalTune:
         if self._settings["test_size"] is not None:
             self.test_df = self.test_df.sample(self._settings["test_size"])
 
-        self.r_scorer = (
-            None
-            if "r_scorer" not in self.metrics_to_report
-            else RScoreWrapper(
-                self.outcome_model,
-                self.propensity_model,
-                self.train_df,
-                self.test_df,
-                outcome,
-                treatment,
-                common_causes,
-                effect_modifiers,
+        if "r_scorer" in self.metrics_to_report:
+            raise NotImplementedError(
+                "R-squared scorer no longer suported, please raise an issue if you want it back"
             )
-        )
+        # self.r_scorer = (
+        #     None
+        #     if "r_scorer" not in self.metrics_to_report
+        #     else RScoreWrapper(
+        #         self.outcome_model,
+        #         self.propensity_model,
+        #         self.train_df,
+        #         self.test_df,
+        #         outcome,
+        #         treatment,
+        #         common_causes,
+        #         effect_modifiers,
+        #     )
+        # )
 
-        search_space = self.cfg.search_space(self.estimator_list)
+        search_space = self.cfg.search_space(self.estimator_list, data_size=data.data.shape)
         init_cfg = (
-            self.cfg.default_configs(self.estimator_list)
+            self.cfg.default_configs(self.estimator_list, data_size=data.data.shape)
             if self._settings["try_init_configs"]
             else []
         )
@@ -484,31 +482,39 @@ class CausalTune:
             # append init_cfgs that have not yet been evaluated
             for cfg in init_cfg:
                 self.resume_cfg.append(cfg) if cfg not in self.resume_cfg else None
-
-        self.results = tune.run(
-            self._tune_with_config,
-            search_space,
-            metric=self.metric,
-            points_to_evaluate=(
-                init_cfg if len(self.resume_cfg) == 0 else self.resume_cfg
-            ),
-            evaluated_rewards=(
-                [] if len(self.resume_scores) == 0 else self.resume_scores
-            ),
-            mode=(
-                "min"
-                if self.metric in ["energy_distance", "psw_energy_distance"]
-                else "max"
-            ),
-            low_cost_partial_config={},
-            **self._settings["tuner"],
-        )
-
-        if self.results.get_best_trial() is None:
-            raise Exception(
-                "Optimization failed! Did you set large enough time_budget and components_budget?"
+        try:
+            self.results = tune.run(
+                self._tune_with_config,
+                search_space,
+                metric=self.metric,
+                # use_ray=self.use_ray,
+                cost_attr="evaluation_cost",
+                points_to_evaluate=(init_cfg if len(self.resume_cfg) == 0 else self.resume_cfg),
+                evaluated_rewards=([] if len(self.resume_scores) == 0 else self.resume_scores),
+                mode=("min" if self.metric in metrics_to_minimize() else "max"),
+                # resources_per_trial= {"cpu": 1} if self.use_ray else None,
+                low_cost_partial_config={},
+                **self._settings["tuner"],
             )
 
+            if self.results.get_best_trial() is None:
+                raise Exception(
+                    "Optimization failed! Did you set large enough time_budget and components_budget?"
+                )
+        except Exception:
+            # we must have an older FLAML version that doesn't support the cost_attr parameter
+            self.results = tune.run(
+                self._tune_with_config,
+                search_space,
+                metric=self.metric,
+                points_to_evaluate=(init_cfg if len(self.resume_cfg) == 0 else self.resume_cfg),
+                evaluated_rewards=([] if len(self.resume_scores) == 0 else self.resume_scores),
+                mode=("min" if self.metric in metrics_to_minimize() else "max"),
+                low_cost_partial_config={},
+                **self._settings["tuner"],
+            )
+            # print("Optimization failed!\n", traceback.format_exc())
+            # raise e
         self.update_summary_scores()
 
     def update_summary_scores(self):
@@ -527,44 +533,89 @@ class CausalTune:
             self.scores[est_name]["estimator"] = self._best_estimators[est_name][1]
 
     def _tune_with_config(self, config: dict) -> dict:
-        """Performs Hyperparameter Optimisation for a
-        causal inference estimator
+        """
+        Performs Hyperparameter Optimisation for a causal inference estimator.
 
         Args:
-            config (dict): dictionary with search space for
-                all tunable parameters
+            config (dict): Dictionary with search space for all tunable parameters.
 
         Returns:
             (dict): values of metrics after optimisation
         """
-        # estimate effect with current config
+        from causaltune.remote import remote_exec
 
-        # if using FLAML < 1.0.7 need to set n_jobs = 2 here
-        # to spawn a separate process to prevent cross-talk between tuner and automl on component models:
+        if self.use_ray:
+            # flaml.tune handles the interaction with Ray itself
+            # estimates = self._estimate_effect(config)
+            estimates = remote_exec(CausalTune._estimate_effect, (self, config), self.use_ray)
+        else:
+            estimates = remote_exec(CausalTune._estimate_effect, (self, config), self.use_ray)
 
-        estimates = Parallel(n_jobs=2, backend="threading")(
-            delayed(self._estimate_effect)(config["estimator"]) for i in range(1)
-        )[0]
-        # estimates = self._estimate_effect(config["estimator"])
+        #     Parallel(n_jobs=2, backend="threading")(
+        #     delayed(self._estimate_effect)(config) for i in range(1)
+        # ))[0]
 
-        # pop and cache separately the fitted model object, so we only store the best ones per estimator
         if "exception" not in estimates:
             est_name = estimates["estimator_name"]
+            current_score = estimates[self.metric]
+
+            estimates["optimization_score"] = current_score
+            estimates["evaluation_cost"] = 1e8  # will be overwritten for successful runs
+
+            # Initialize best_score if this is the first estimator for this name
+            if est_name not in self._best_estimators:
+                self._best_estimators[est_name] = (
+                    (
+                        np.inf
+                        if self.metric
+                        in [
+                            "energy_distance",
+                            "psw_energy_distance",
+                            "frobenius_norm",
+                            "psw_frobenius_norm",
+                            "codec",
+                            "policy_risk",
+                        ]
+                        else -np.inf
+                    ),
+                    None,
+                )
+
+            best_score = self._best_estimators[est_name][0]
+
+            # Determine if the current estimator performs better, handling inf values
+            if self.metric in [
+                "energy_distance",
+                "psw_energy_distance",
+                "frobenius_norm",
+                "psw_frobenius_norm",
+                "codec",
+                "policy_risk",
+            ]:
+                is_better = (np.isfinite(current_score) and current_score < best_score) or (
+                    np.isinf(best_score) and np.isfinite(current_score)
+                )
+            else:
+                is_better = (np.isfinite(current_score) and current_score > best_score) or (
+                    np.isinf(best_score) and np.isfinite(current_score)
+                )
+
+            # Store the estimator if we're storing all, if it's better, or if it's the first valid (non-inf) estimator
             if (
-                self._best_estimators[est_name][0] > estimates[self.metric]
-                if self.metric in ["energy_distance", "psw_energy_distance"]
-                else self._best_estimators[est_name][0] < estimates[self.metric]
+                self._settings["store_all"]
+                or is_better
+                or (self._best_estimators[est_name][1] is None and np.isfinite(current_score))
             ):
-                if self._settings["store_all"]:
-                    self._best_estimators[est_name] = (
-                        estimates[self.metric],
-                        estimates["estimator"],
-                    )
-                else:
-                    self._best_estimators[est_name] = (
-                        estimates[self.metric],
-                        estimates.pop("estimator"),
-                    )
+                self._best_estimators[est_name] = (
+                    current_score,
+                    (
+                        estimates["estimator"]
+                        if self._settings["store_all"]
+                        else estimates.pop("estimator")
+                    ),
+                )
+            if "Dummy" not in est_name:
+                estimates["evaluation_cost"] = estimates.pop("elapsed_time")
 
         return estimates
 
@@ -582,19 +633,14 @@ class CausalTune:
     def _estimate_effect(self, config):
         """estimates effect with chosen estimator"""
 
-        # add params that are tuned by flaml:
-        config = clean_config(copy.copy(config))
-        self.estimator_name = config.pop("estimator_name")
-        # params_to_tune = {
-        #     k: v for k, v in config.items() if (not k == "estimator_name")
-        # }
-        cfg = self.cfg.method_params(self.estimator_name)
-        method_params = {
-            "init_params": {**deepcopy(config), **cfg.init_params},
-            "fit_params": {},
-        }
+        # Do we need an boject property for this, instead of a local var?
+        self.estimator_name = config["estimator"]["estimator_name"]
+        outcome_model = self.init_outcome_model(self._settings["outcome_model"])
+        method_params = self.cfg.method_params(config, outcome_model, self.propensity_model)
+
         try:  #
-            # if True:  #
+            # This calls the causal model's estimate_effect method
+            start_time = time.time()
             estimate = self._est_effect_stub(method_params)
             scores = {
                 "estimator_name": self.estimator_name,
@@ -607,13 +653,15 @@ class CausalTune:
                     self.test_df,
                 ),
             }
-
+            elapsed_time = time.time() - start_time
             return {
                 self.metric: scores["validation"][self.metric],
                 "estimator": estimate,
-                "estimator_name": scores.pop("estimator_name"),
+                "estimator_name": self.estimator_name,
                 "scores": scores,
+                # TODO: return full config!
                 "config": config,
+                "elapsed_time": elapsed_time,
             }
         except Exception as e:
             print("Evaluation failed!\n", config, traceback.format_exc())
@@ -625,9 +673,7 @@ class CausalTune:
             }
 
     def _compute_metrics(self, estimator, df: pd.DataFrame) -> dict:
-        return self.scorer.make_scores(
-            estimator, df, self.metrics_to_report, r_scorer=None
-        )
+        return self.scorer.make_scores(estimator, df, self.metrics_to_report, r_scorer=None)
 
     def score_dataset(self, df: pd.DataFrame, dataset_name: str):
         """
@@ -641,7 +687,10 @@ class CausalTune:
             None.
         """
         for scr in self.scores.values():
-            scr["scores"][dataset_name] = self._compute_metrics(scr["estimator"], df)
+            if scr["estimator"] is None:
+                warnings.warn("Skipping scoring for estimator %s", scr["estimator_name"])
+            else:
+                scr["scores"][dataset_name] = self._compute_metrics(scr["estimator"], df)
 
     @property
     def best_estimator(self) -> str:
@@ -714,9 +763,7 @@ class CausalTune:
         """
         return self.model.effect(df, *args, **kwargs)
 
-    def predict(
-        self, cd: CausalityDataset, preprocess: Optional[bool] = False, *args, **kwargs
-    ):
+    def predict(self, cd: CausalityDataset, preprocess: Optional[bool] = False, *args, **kwargs):
         """Heterogeneous Treatment Effects for data CausalityDataset
 
         Args:
@@ -788,21 +835,20 @@ class CausalTune:
         if "Econml" in str(type(self.model)):
             # Get a list of "Inference" objects from EconML, one per treatment
             self.model.__class__.effect_stderr = effect_stderr
-            cfg = self.cfg.method_params(self.best_estimator)
+            outcome_model = self.init_outcome_model(self._settings["outcome_model"])
+            method_params = self.cfg.method_params(
+                self.best_config, outcome_model, self.propensity_model
+            )
 
-            if cfg.inference == "bootstrap":
+            if self.cfg.full_config(self.best_estimator).inference == "bootstrap":
                 # TODO: before bootstrapping, check whether that's already been done
                 bootstrap = BootstrapInference(
                     n_bootstrap_samples=n_bootstrap_samples, n_jobs=n_jobs
                 )
-
-                best_cfg = {
-                    k: v for k, v in self.best_config.items() if k not in ["estimator"]
-                }
-                method_params = {
-                    "init_params": {**best_cfg, **cfg.init_params},
-                    "fit_params": {"inference": bootstrap},
-                }
+                method_params["fit_params"]["inference"] = bootstrap
+                self.estimator_name = (
+                    self.best_estimator
+                )  # needed for _est_effect_stub, just in case
                 self.bootstrapped_estimate = self._est_effect_stub(method_params)
                 est = self.bootstrapped_estimate.estimator
             else:

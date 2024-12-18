@@ -9,7 +9,7 @@ from causaltune.datasets import (
     generate_synth_data_with_categories,
     linear_multi_dataset,
 )
-from causaltune.params import SimpleParamService
+from causaltune.search.params import SimpleParamService
 
 warnings.filterwarnings("ignore")  # suppress sklearn deprecation warnings for now..
 
@@ -24,8 +24,6 @@ class TestCustomPropensityModel(object):
         data.preprocess_dataset()
 
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=False,
@@ -41,27 +39,16 @@ class TestCustomPropensityModel(object):
             verbose=3,
             components_verbose=2,
             resources_per_trial={"cpu": 0.5},
+            outcome_model="auto",
         )
 
         ct.fit(data)
         ct.effect(data.data)
         ct.score_dataset(data.data, "test")
 
-        # now let's test Shapley values calculation
-        for est_name, scores in ct.scores.items():
-            # Dummy model doesn't support Shapley values
-            # Orthoforest shapley calc is VERY slow
-            if "Dummy" not in est_name and "Ortho" not in est_name:
-                print("Calculating Shapley values for", est_name)
-                shap_values(scores["estimator"], data.data[:10])
-
-        print(f"Best estimator: {ct.best_estimator}")
-
     def test_sklearn_propensity_model_multivalue(self):
         data = linear_multi_dataset(5000)
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=True,
@@ -75,6 +62,7 @@ class TestCustomPropensityModel(object):
             estimator_list="all",
             num_samples=len(estimator_list),
             components_time_budget=10,
+            outcome_model="auto",
         )
         ct.fit(data)
         # TODO add an effect() call and an effect_tt call

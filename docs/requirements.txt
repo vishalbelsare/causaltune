@@ -1,8 +1,6 @@
-furo==2021.11.16
+furo
 nbsphinx
 sphinx_gallery
 sphinx_rtd_theme
 myst-parser
 pypandoc_binary
-
-file:../causaltune/

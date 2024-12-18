@@ -5,7 +5,7 @@ from econml.inference import BootstrapInference
 
 from causaltune import CausalTune
 from causaltune.datasets import linear_multi_dataset
-from causaltune.params import SimpleParamService
+from causaltune.search.params import SimpleParamService
 
 warnings.filterwarnings("ignore")  # suppress sklearn deprecation warnings for now..
 
@@ -17,12 +17,10 @@ class TestEndToEndInference(object):
 
     def test_endtoend_inference_nobootstrap(self):
         """tests if CATE model can be instantiated and fit to data"""
-        data = linear_multi_dataset(1000)
+        data = linear_multi_dataset(1000, impact={0: 0.0, 1: 2.0})
         data.preprocess_dataset()
 
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=False,
@@ -31,8 +29,10 @@ class TestEndToEndInference(object):
         estimator_list = cfg.estimator_names_from_patterns(
             "backdoor", "cheap_inference", len(data.data)
         )
+        print("estimators: ", estimator_list)
 
         for e in estimator_list:
+            print(e)
             causaltune = CausalTune(
                 num_samples=4,
                 components_time_budget=10,
@@ -41,10 +41,12 @@ class TestEndToEndInference(object):
                 verbose=3,
                 components_verbose=2,
                 resources_per_trial={"cpu": 0.5},
+                outcome_model="auto",
             )
 
             causaltune.fit(data)
             causaltune.effect_stderr(data.data)
+            causaltune.score_dataset(data.data, "test")
 
     def test_endtoend_inference_bootstrap(self):
         """tests if CATE model can be instantiated and fit to data"""
@@ -63,6 +65,7 @@ class TestEndToEndInference(object):
                 verbose=3,
                 components_verbose=2,
                 resources_per_trial={"cpu": 0.5},
+                outcome_model="auto",
             )
 
             causaltune.fit(data)
@@ -71,8 +74,6 @@ class TestEndToEndInference(object):
     def test_endtoend_multivalue_nobootstrap(self):
         data = linear_multi_dataset(1000)
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=True,
@@ -91,11 +92,14 @@ class TestEndToEndInference(object):
                 verbose=3,
                 components_verbose=2,
                 resources_per_trial={"cpu": 0.5},
+                outcome_model="auto",
             )
 
             causaltune.fit(data)
             causaltune.effect_stderr(data.data)
-
+            causaltune.effect(data.data)
+            scores = causaltune.score_dataset(data.data, "test")
+            print(scores)
         # TODO add an effect() call and an effect_tt call
         print("yay!")
 
@@ -111,6 +115,7 @@ class TestEndToEndInference(object):
                 estimator_list=[e],
                 use_ray=False,
                 verbose=3,
+                outcome_model="auto",
                 components_verbose=2,
                 resources_per_trial={"cpu": 0.5},
             )
@@ -124,4 +129,4 @@ class TestEndToEndInference(object):
 
 if __name__ == "__main__":
     pytest.main([__file__])
-    # TestEndToEnd().test_endtoend_iv()
+    # TestEndToEndInference().test_endtoend_multivalue_bootstrap()

@@ -3,7 +3,7 @@ import warnings
 
 from causaltune import CausalTune
 from causaltune.datasets import linear_multi_dataset
-from causaltune.params import SimpleParamService
+from causaltune.search.params import SimpleParamService
 
 warnings.filterwarnings("ignore")  # suppress sklearn deprecation warnings for now..
 
@@ -35,6 +35,7 @@ class TestEndToEndAutoMLPropensity(object):
             components_verbose=2,
             propensity_model="auto",
             resources_per_trial={"cpu": 0.5},
+            outcome_model="auto",
         )
 
         causaltune.fit(data)
@@ -53,8 +54,6 @@ class TestEndToEndAutoMLPropensity(object):
         data = linear_multi_dataset(10000)
 
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=True,
@@ -69,6 +68,7 @@ class TestEndToEndAutoMLPropensity(object):
             propensity_model="auto",
             num_samples=len(estimator_list),
             components_time_budget=10,
+            outcome_model="auto",
         )
         ct.fit(data)
         # TODO add an effect() call and an effect_tt call

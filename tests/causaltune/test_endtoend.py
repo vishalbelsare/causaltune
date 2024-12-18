@@ -1,10 +1,9 @@
-import pytest
 import warnings
 
 
 from causaltune import CausalTune
 from causaltune.datasets import generate_non_random_dataset, linear_multi_dataset
-from causaltune.params import SimpleParamService
+from causaltune.search.params import SimpleParamService
 
 warnings.filterwarnings("ignore")  # suppress sklearn deprecation warnings for now..
 
@@ -42,8 +41,6 @@ class TestEndToEnd(object):
         data.preprocess_dataset()
 
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=False,
@@ -58,6 +55,7 @@ class TestEndToEnd(object):
             verbose=3,
             components_verbose=2,
             resources_per_trial={"cpu": 0.5},
+            outcome_model="auto",
         )
 
         ct.fit(data)
@@ -78,8 +76,6 @@ class TestEndToEnd(object):
     def test_endtoend_multivalue(self):
         data = linear_multi_dataset(5000)
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=True,
@@ -92,6 +88,7 @@ class TestEndToEnd(object):
             estimator_list="all",
             num_samples=len(estimator_list),
             components_time_budget=10,
+            outcome_model="auto",
         )
         ct.fit(data)
         # ct.fit(data, resume=True)
@@ -101,5 +98,6 @@ class TestEndToEnd(object):
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    TestEndToEnd().test_endtoend_cate()
+    # pytest.main([__file__])
     # TestEndToEnd().test_endtoend_iv()

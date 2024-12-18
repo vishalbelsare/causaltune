@@ -5,7 +5,7 @@ from sklearn.linear_model import LinearRegression
 
 from causaltune import CausalTune
 from causaltune.datasets import linear_multi_dataset, generate_synthetic_data
-from causaltune.params import SimpleParamService
+from causaltune.search.params import SimpleParamService
 
 warnings.filterwarnings("ignore")  # suppress sklearn deprecation warnings for now..
 
@@ -20,8 +20,6 @@ class TestCustomOutputModel(object):
         data.preprocess_dataset()
 
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=False,
@@ -56,8 +54,6 @@ class TestCustomOutputModel(object):
     def test_custom_outcome_model_multivalue(self):
         data = linear_multi_dataset(10000)
         cfg = SimpleParamService(
-            propensity_model=None,
-            outcome_model=None,
             n_jobs=-1,
             include_experimental=False,
             multivalue=True,
